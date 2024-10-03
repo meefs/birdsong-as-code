@@ -43,12 +43,12 @@
     (* (env-gen (perc 0.01 dur)))
     (rlpf (mul-add (sin-osc vibrato) (line:kr 0 200 dur) (* freq 4)) 0.3)
     (* vol 4)
-    (clip2 0.4)
+    (clip2 0.7)
     (+ (* 1/3 (sin-osc freq) (env-gen (perc under-attack dur))))
-    (+ (* (lpf (* 1 (brown-noise)) 500) (env-gen (perc 0.01 0.2))))
-    (* (env-gen (adsr attack 0.03 1 0.1) (* gate (line:kr 1.0 0.0 dur))))
-    (+ (lpf (* 2 (square freq) (env-gen (perc 0.01 0.2))) 1500))
+    (+ (* (lpf (* 0.1 (white-noise)) resonance) (env-gen (perc 0.1 0.2))))
+    (* (env-gen (adsr attack 0.2 0.4 0.3) (* gate (line:kr 1.0 0.0 dur))))
     (rlpf (* walk resonance) 0.1)
+    (+ (lpf (* 2 (square freq) (env-gen (perc 0.01 0.2))) 1500))
     (* vol)
     (effects :pan pan :wet wet :room room :volume vol :high limit)))
 
@@ -186,7 +186,6 @@
 ;;; THE BUTCHERBIRD COMBINATOR                 ;;;
 ;;;                                            ;;;
 ;;; Chris Ford                                 ;;;
-;;; https://github.com/ctford/birdsong-as-code ;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (comment
@@ -194,6 +193,7 @@
   (+ 440 110)
   (butcherbird-23)
 )
+
 
 
 
@@ -517,21 +517,51 @@
 
 (def keytar-instrument corgan #_blorp)
 
+(defonce sustain-on (atom false))
 (defonce notes-in-progress (atom {}))
+(defonce notes-in-sustain (atom {}))
+
+(defn kill-note [note collection]
+  (let [node (collection note)]
+    (when (node-live? node)
+      (ctl node :gate 0))))
+
+(defn kill-notes-in [collection]
+  (doseq [[note _] collection]
+    (kill-note note collection)))
+
+(defn kill-all-notes []
+  (kill-notes-in @notes-in-progress)
+  (kill-notes-in @notes-in-sustain))
+
+(def keytar-sustain
+  (on-event [:midi :control-change]
+            (fn [{:keys [note data2]}]
+              (case note
+                64 (let [sustain? (>= data2 64)]
+                     (reset! sustain-on sustain?)
+                     (when-not sustain? (kill-all-notes)))))
+            ::sustain-change))
 
 (def keytar-note-on
   (on-event [:midi :note-on]
             (fn [{note :note velocity :velocity}]
               (let [unit-volume (+ 0.6 (* 0.3 (/ velocity 128)))
                     synth (some-> note midi->freq (/ 2) (keytar-instrument :dur 15 :vol (/ velocity 128)))]
+                (kill-note note @notes-in-progress)
                 (swap! notes-in-progress assoc note synth)))
             ::midi-note-on))
 
 (def keytar-note-off
   (on-event [:midi :note-off]
-           (fn [{note :note}]
-             (ctl (@notes-in-progress note) :gate 0))
-           ::midi-note-off))
+            (fn [{note :note}]
+              (if (not @sustain-on)
+                (kill-note note @notes-in-progress)
+                (do
+                  (kill-note note notes-in-sustain)
+                  (swap! notes-in-sustain assoc note (@notes-in-progress note))
+                  (swap! notes-in-progress dissoc note))))
+            ::midi-note-off))
 
 (def kit {:kick #(drums/kick2 66)
           :tick #(drums/closed-hat :t 0.01 :hi 20),
